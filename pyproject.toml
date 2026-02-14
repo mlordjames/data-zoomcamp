@@ -1,7 +1,15 @@
 [project]
 name = "data-engineering-zoomcamp"
 version = "0.1.0"
-description = "Add your description here"
+description = "Data zoomcamp leaning resources"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "boto3",
+    "botocore",
+    "pandas",
+    "requests",
+    "tqdm",
+    "click",
+    "urllib3"
+]

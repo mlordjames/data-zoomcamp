@@ -1,0 +1,37 @@
+2026-02-13 20:06:51,888 | INFO | MainThread | Logging to: /mnt/d/personal development tools/data-engineering-zoomcamp/out/logs/openpayments_download_2024_20260213_200651.log
+2026-02-13 20:06:51,893 | INFO | MainThread | Creating totals file (rescrape=False). Output: openpayments_companies_totals_by_year_13-02-2026.json
+2026-02-13 20:06:53,530 | INFO | MainThread | Fetched 100 IDs (offset 0 -> 99)
+2026-02-13 20:06:54,420 | INFO | MainThread | Fetched 100 IDs (offset 100 -> 199)
+2026-02-13 20:06:55,206 | INFO | MainThread | Fetched 100 IDs (offset 200 -> 299)
+2026-02-13 20:06:55,933 | INFO | MainThread | Fetched 100 IDs (offset 300 -> 399)
+2026-02-13 20:06:56,645 | INFO | MainThread | Fetched 100 IDs (offset 400 -> 499)
+2026-02-13 20:06:57,616 | INFO | MainThread | Fetched 100 IDs (offset 500 -> 599)
+2026-02-13 20:06:58,666 | INFO | MainThread | Fetched 100 IDs (offset 600 -> 699)
+2026-02-13 20:06:59,884 | INFO | MainThread | Fetched 100 IDs (offset 700 -> 799)
+2026-02-13 20:07:00,853 | INFO | MainThread | Fetched 100 IDs (offset 800 -> 899)
+2026-02-13 20:07:01,612 | INFO | MainThread | Fetched 100 IDs (offset 900 -> 999)
+2026-02-13 20:07:02,304 | INFO | MainThread | Fetched 100 IDs (offset 1000 -> 1099)
+2026-02-13 20:07:03,010 | INFO | MainThread | Fetched 100 IDs (offset 1100 -> 1199)
+2026-02-13 20:07:03,691 | INFO | MainThread | Fetched 100 IDs (offset 1200 -> 1299)
+2026-02-13 20:07:04,334 | INFO | MainThread | Fetched 100 IDs (offset 1300 -> 1399)
+2026-02-13 20:07:05,017 | INFO | MainThread | Fetched 100 IDs (offset 1400 -> 1499)
+2026-02-13 20:07:05,736 | INFO | MainThread | Fetched 100 IDs (offset 1500 -> 1599)
+2026-02-13 20:07:06,400 | INFO | MainThread | Fetched 100 IDs (offset 1600 -> 1699)
+2026-02-13 20:07:07,122 | INFO | MainThread | Fetched 100 IDs (offset 1700 -> 1799)
+2026-02-13 20:07:07,882 | INFO | MainThread | Fetched 100 IDs (offset 1800 -> 1899)
+2026-02-13 20:07:08,556 | INFO | MainThread | Fetched 100 IDs (offset 1900 -> 1999)
+2026-02-13 20:07:09,346 | INFO | MainThread | Fetched 100 IDs (offset 2000 -> 2099)
+2026-02-13 20:07:10,008 | INFO | MainThread | Fetched 100 IDs (offset 2100 -> 2199)
+2026-02-13 20:07:10,640 | INFO | MainThread | Fetched 100 IDs (offset 2200 -> 2299)
+2026-02-13 20:07:11,378 | INFO | MainThread | Fetched 100 IDs (offset 2300 -> 2399)
+2026-02-13 20:07:12,007 | INFO | MainThread | Fetched 100 IDs (offset 2400 -> 2499)
+2026-02-13 20:07:12,714 | INFO | MainThread | Fetched 31 IDs (offset 2500 -> 2530)
+2026-02-13 20:07:13,348 | INFO | MainThread | Total IDs found: 2531
+2026-02-13 20:07:13,350 | INFO | MainThread | Fetching totals for 2531 companies with 10 workers...
+2026-02-13 20:11:33,771 | INFO | MainThread | Saved 2531 rows to totals/openpayments_companies_totals_by_year_13-02-2026.json
+2026-02-13 20:11:33,771 | INFO | MainThread | Success: 2531 | Failed: 0
+2026-02-13 20:11:33,851 | INFO | MainThread | Applied max_files=20 -> tasks=20
+2026-02-13 20:11:33,852 | INFO | MainThread | Year=2024 | Dataset=e6b17c6a-2534-4207-a4a1-6746a14911ff | Tasks=20
+2026-02-13 20:11:33,852 | INFO | MainThread | URL=https://openpaymentsdata.cms.gov/api/1/datastore/query/e6b17c6a-2534-4207-a4a1-6746a14911ff/download
+2026-02-13 20:11:33,855 | INFO | MainThread | Totals file used: /mnt/d/personal development tools/data-engineering-zoomcamp/totals/openpayments_companies_totals_by_year_13-02-2026.json
+2026-02-13 20:13:28,824 | INFO | MainThread | Report saved: /mnt/d/personal development tools/data-engineering-zoomcamp/out/download_report_2024.csv
