@@ -1,2 +1,0 @@
-2026-02-13 20:03:56,756 | INFO | MainThread | Logging to: /mnt/d/personal development tools/data-engineering-zoomcamp/out/logs/openpayments_download_2024_20260213_200356.log
-2026-02-13 20:03:56,761 | INFO | MainThread | Creating totals file (rescrape=False). Output: openpayments_companies_totals_by_year_13-02-2026.json

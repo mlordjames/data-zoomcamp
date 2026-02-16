@@ -31,9 +31,7 @@ import datasetid
 # CONFIG
 # -------------------------------------------------------------------
 
-YEAR_TO_DATASET_ID = {
-    int(k): v for k, v in datasetid.getdatasetids(cache_dir="./metadata").items()
-}
+YEAR_TO_DATASET_ID = {int(k): v for k, v in datasetid.getdatasetids(cache_dir="./metadata").items()}
 
 PAGE_LIMIT = 5000
 

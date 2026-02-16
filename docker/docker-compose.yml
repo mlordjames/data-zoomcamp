@@ -1,9 +1,0 @@
-services:
-  openpayments:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-    container_name: openpayments-dev
-    volumes:
-      - ./data:/app/data
-    working_dir: /app

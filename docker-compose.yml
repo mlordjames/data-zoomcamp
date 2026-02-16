@@ -1,0 +1,19 @@
+services:
+  openpayments:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: openpayments-dev
+    volumes:
+      - ./data:/app/data
+    working_dir: /app
+    command:
+      [
+        "--year","2024",
+        "--out-root","/app/data/out",
+        "--totals-dir","/app/data/totals",
+        "--max-files","20",
+        "--ensure-totals",
+        "--id-workers","10",
+        "--page-workers","10"
+      ]
