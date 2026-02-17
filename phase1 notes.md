@@ -320,32 +320,8 @@ Once downloads are stable:
 
 ---
 
-## 8) Suggested LinkedIn progress post (optional)
-**Title/Hook**
-> Building an ingestion system ≠ downloading a CSV.
 
-**Body**
-Over the last phase of my Data Engineering Zoomcamp (AWS-focused), I’ve been building a repeatable ingestion engine around the CMS Open Payments dataset.
-
-What’s shipped so far:
-- concurrent company-level extraction
-- totals-by-year index used for planning downloads
-- pagination + parallel page fetching for large companies
-- header validation + partial row protection
-- dated caching to avoid re-scraping totals repeatedly
-- Dockerized execution with WSL support + local volume mapping
-
-One surprising bug I had to solve:
-The dataset ID exposed in the frontend JS wasn’t the real download-ready datastore ID — it required a resolver call to the datastore API to get the final resource ID.
-
-Next:
-Hardening the CLI + integrating raw zone uploads into S3 (then Glue/Athena validation).
-
-#DataEngineering #AWS #Docker #ETL #OpenData #Zoomcamp
-
----
-
-## 9) Phase 1 Definition of Done (DoD)
+## 8) Phase 1 Definition of Done (DoD)
 Phase 1 is complete when:
 - Dataset ID resolution is stable and cached
 - Totals JSON caching works (10-day rule + add-year-if-missing)
