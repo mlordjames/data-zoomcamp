@@ -23,30 +23,30 @@ from requests.adapters import HTTPAdapter
 from tqdm import tqdm
 from urllib3.util.retry import Retry
 
-# If your recordstotal.py is in the same folder, keep this import.
-# It must expose:
-#   build_totals_json(out_path=..., min_year=..., max_year=..., verbose=..., workers=..., limit=..., country=...)
-import recordstotal  # noqa: E402
+import recordstotal  # expects build_totals_json(...)
 import datasetid
 
-# -------------------------------------------------------------------
-# CONFIG
-# -------------------------------------------------------------------
+# -----------------------------
+# Repo-aware defaults (/scripts)
+# -----------------------------
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_OUT_ROOT = REPO_ROOT / "data" / "out"
+DEFAULT_TOTALS_DIR = REPO_ROOT / "data" / "totals"
+DEFAULT_METADATA_CACHE = REPO_ROOT / "metadata"
 
-# Dataset support (extend later)
+# -----------------------------
+# CONFIG
+# -----------------------------
 DATASET_CHOICES = ["general-payments"]
 
-# Dataset ID resolution (for now: year -> dataset_id for general-payments)
-YEAR_TO_DATASET_ID = {int(k): v for k, v in datasetid.getdatasetids(cache_dir="./metadata").items()}
+YEAR_TO_DATASET_ID = {int(k): v for k, v in datasetid.getdatasetids(cache_dir=str(DEFAULT_METADATA_CACHE)).items()}
 
 PAGE_LIMIT = 5000
-
 CONNECT_TIMEOUT = 60
 READ_TIMEOUT = 180
 
 MAX_RETRIES = 4
 BACKOFF_FACTOR = 0.8
-
 MANUAL_ATTEMPTS = 5
 MANUAL_BACKOFF_BASE = 2.0
 
@@ -63,17 +63,41 @@ TOTALS_PREFIX = "openpayments_companies_totals_by_year"
 TOTALS_DATE_FMT = "%d-%m-%Y"
 TOTALS_MAX_AGE_DAYS = 10
 
-# Concurrency safety caps (prevents runaway nested thread explosion)
+# Avoid nested thread explosion
 MAX_PAGE_WORKERS_CAP = 5
 
-# -------------------------------------------------------------------
-# LOGGING
-# -------------------------------------------------------------------
+_thread_local = threading.local()
+
+
+# -----------------------------
+# Utilities
+# -----------------------------
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def ensure_dir(p: Path) -> None:
+    p.mkdir(parents=True, exist_ok=True)
+
+
+def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def write_json(path: Path, payload: Dict) -> None:
+    ensure_dir(path.parent)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(path)
 
 
 def setup_logging(out_root: Path, run_id: str, verbose: bool) -> Path:
     logs_dir = out_root / "metadata" / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
+    ensure_dir(logs_dir)
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = logs_dir / f"openpayments_download_runid={run_id}_{ts}.log"
@@ -100,11 +124,9 @@ def setup_logging(out_root: Path, run_id: str, verbose: bool) -> Path:
     return log_path
 
 
-# -------------------------------------------------------------------
-# TOTALS CACHE MANAGEMENT
-# -------------------------------------------------------------------
-
-
+# -----------------------------
+# Totals cache management
+# -----------------------------
 @dataclass
 class TotalsFile:
     path: Path
@@ -112,10 +134,6 @@ class TotalsFile:
 
 
 def _parse_totals_date_from_name(name: str) -> Optional[datetime]:
-    """
-    Expected:
-      openpayments_companies_totals_by_year_dd-mm-yyyy.json
-    """
     m = re.search(rf"{re.escape(TOTALS_PREFIX)}_(\d{{2}}-\d{{2}}-\d{{4}})\.json$", name)
     if not m:
         return None
@@ -143,12 +161,11 @@ def find_latest_totals_file(totals_dir: Path) -> Optional[TotalsFile]:
 
 
 def is_totals_fresh(totals_file: TotalsFile, max_age_days: int = TOTALS_MAX_AGE_DAYS) -> bool:
-    age = datetime.now() - totals_file.date
-    return age <= timedelta(days=max_age_days)
+    return (datetime.now() - totals_file.date) <= timedelta(days=max_age_days)
 
 
 def totals_file_for_today(totals_dir: Path) -> Path:
-    totals_dir.mkdir(parents=True, exist_ok=True)
+    ensure_dir(totals_dir)
     today = datetime.now().strftime(TOTALS_DATE_FMT)
     return totals_dir / f"{TOTALS_PREFIX}_{today}.json"
 
@@ -176,27 +193,19 @@ def ensure_totals_for_year(
     totals_country: str,
     verbose: bool,
 ) -> Path:
-    """
-    Rules:
-    - Totals file name contains dd-mm-yyyy
-    - If we have totals file <= 10 days old and contains total_{year} => use it (unless rescrape)
-    - If fresh file exists but missing total_{year} => scrape only that year and merge into same fresh file
-    - If no fresh file => create today's file (and include at least the requested year)
-    """
-    totals_dir.mkdir(parents=True, exist_ok=True)
+    ensure_dir(totals_dir)
     latest = find_latest_totals_file(totals_dir)
 
     if latest and is_totals_fresh(latest) and (not rescrape):
-        logging.info("Found fresh totals file: %s", latest.path.name)
         df_old = load_company_totals_json(latest.path)
         col = f"total_{year}"
         if col in df_old.columns:
-            logging.info("Totals file already contains %s. Using it.", col)
+            logging.info("Using fresh totals file: %s", latest.path.name)
             return latest.path
 
-        logging.info("Fresh totals file missing %s. Scraping that year and merging...", col)
-
+        logging.info("Fresh totals missing %s. Scraping year and merging...", col)
         tmp_new = totals_dir / f"_tmp_totals_{year}_{int(time.time())}.json"
+
         recordstotal.build_totals_json(
             out_path=str(tmp_new),
             workers=totals_workers,
@@ -206,8 +215,8 @@ def ensure_totals_for_year(
             max_year=year,
             verbose=verbose,
         )
-        df_new = load_company_totals_json(tmp_new)
 
+        df_new = load_company_totals_json(tmp_new)
         keep_cols = ["company_id"]
         if col in df_new.columns:
             keep_cols.append(col)
@@ -215,7 +224,6 @@ def ensure_totals_for_year(
             keep_cols.append("error")
 
         df_new = df_new[keep_cols].copy()
-
         df_merged = df_old.merge(df_new, on="company_id", how="outer", suffixes=("", "_new"))
 
         if "error_new" in df_merged.columns:
@@ -235,7 +243,7 @@ def ensure_totals_for_year(
         return latest.path
 
     out_path = totals_file_for_today(totals_dir)
-    logging.info("Creating totals file (rescrape=%s). Output: %s", rescrape, out_path.name)
+    logging.info("Creating totals file: %s", out_path.name)
 
     recordstotal.build_totals_json(
         out_path=str(out_path),
@@ -249,18 +257,11 @@ def ensure_totals_for_year(
     return out_path
 
 
-# -------------------------------------------------------------------
-# HTTP + DOWNLOAD HELPERS (thread-safe sessions)
-# -------------------------------------------------------------------
-
-
-def ensure_dir(p: Path) -> None:
-    p.mkdir(parents=True, exist_ok=True)
-
-
+# -----------------------------
+# HTTP helpers (thread-local sessions)
+# -----------------------------
 def make_session(pool_size: int) -> requests.Session:
     sess = requests.Session()
-
     retry = Retry(
         total=MAX_RETRIES,
         backoff_factor=BACKOFF_FACTOR,
@@ -268,19 +269,11 @@ def make_session(pool_size: int) -> requests.Session:
         allowed_methods=frozenset(["GET"]),
         raise_on_status=False,
     )
-
-    adapter = HTTPAdapter(
-        max_retries=retry,
-        pool_connections=pool_size,
-        pool_maxsize=pool_size,
-    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=pool_size, pool_maxsize=pool_size)
     sess.mount("https://", adapter)
     sess.mount("http://", adapter)
     sess.headers.update(DEFAULT_HEADERS)
     return sess
-
-
-_thread_local = threading.local()
 
 
 def get_thread_session(pool_size: int) -> requests.Session:
@@ -348,27 +341,6 @@ def validate_header_min_cols(path: Path, expected_min_cols: int) -> Tuple[bool, 
         return (False, f"validation_error:{e}")
 
 
-def count_lines_quick(path: Path, max_lines: int = 3) -> int:
-    try:
-        n = 0
-        with path.open("rb") as f:
-            for _ in f:
-                n += 1
-                if n >= max_lines:
-                    break
-        return n
-    except Exception:
-        return 0
-
-
-def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(chunk_size), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def build_params(company_id: str, offset: int) -> dict:
     return {
         "conditions[0][property]": "applicable_manufacturer_or_applicable_gpo_making_payment_id",
@@ -401,13 +373,15 @@ def request_with_manual_backoff(session: requests.Session, url: str, params: dic
     raise RuntimeError("request_with_manual_backoff exhausted without response")
 
 
-# -------------------------------------------------------------------
-# OUTPUT PATHS + MANIFEST/AUDIT
-# -------------------------------------------------------------------
+# -----------------------------
+# Paths + manifest
+# -----------------------------
+def get_year_dir(out_root: Path, dataset: str, year: int) -> Path:
+    return out_root / f"dataset={dataset}" / f"year={year}"
 
 
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def get_run_dir(out_root: Path, run_id: str) -> Path:
+    return out_root / "metadata" / "runs" / f"run_id={run_id}"
 
 
 def build_run_id(dataset: str, year: int, dataset_id: str, totals_path: Path) -> str:
@@ -422,25 +396,9 @@ def build_run_id(dataset: str, year: int, dataset_id: str, totals_path: Path) ->
     return hashlib.sha1(raw).hexdigest()[:12]
 
 
-def get_year_dir(out_root: Path, dataset: str, year: int) -> Path:
-    # Data-lake-ish local layout (mirrors S3 prefixes later)
-    return out_root / f"dataset={dataset}" / f"year={year}"
-
-
-def get_metadata_run_dir(out_root: Path, run_id: str) -> Path:
-    return out_root / "metadata" / "runs" / f"run_id={run_id}"
-
-
-def write_manifest(path: Path, manifest: Dict) -> None:
-    ensure_dir(path.parent)
-    path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
-
-
-# -------------------------------------------------------------------
-# DOWNLOAD IMPLEMENTATION (returns structured audit)
-# -------------------------------------------------------------------
-
-
+# -----------------------------
+# Download routines
+# -----------------------------
 def download_small_sequential(
     *,
     session: requests.Session,
@@ -448,18 +406,32 @@ def download_small_sequential(
     company_id: str,
     year: int,
     year_dir: Path,
+    resume: bool,
 ) -> Tuple[str, int, bool, str, Optional[Dict]]:
     final_path = year_dir / f"company_id={company_id}.csv"
+
+    # Resume behavior: skip if already valid
+    if resume and final_path.exists() and final_path.stat().st_size > 0:
+        ok, reason = validate_header_min_cols(final_path, EXPECTED_MIN_COLS)
+        if ok:
+            audit = {
+                "company_id": company_id,
+                "year": year,
+                "path": str(final_path),
+                "bytes": int(final_path.stat().st_size),
+                "sha256": sha256_file(final_path),
+                "mode": "resume_skip_existing",
+            }
+            return (company_id, year, True, "skipped_existing_valid", audit)
+
     tmp_path = final_path.with_suffix(".csv.part")
-
-    start = time.perf_counter()
-
     if tmp_path.exists():
         try:
             tmp_path.unlink()
         except Exception:
             pass
 
+    start = time.perf_counter()
     offset = 0
     total_data_rows = 0
     wrote_header = False
@@ -529,7 +501,7 @@ def download_small_sequential(
         "elapsed_seconds": round(elapsed, 4),
         "mode": "small_sequential",
     }
-    return (company_id, year, True, f"downloaded_small_ok_rows~{total_data_rows}", audit)
+    return (company_id, year, True, f"downloaded_rows~{total_data_rows}", audit)
 
 
 def merge_parts(parts: List[Path], final_path: Path) -> Tuple[bool, str]:
@@ -541,13 +513,6 @@ def merge_parts(parts: List[Path], final_path: Path) -> Tuple[bool, str]:
             for p in parts:
                 if p.exists() and p.stat().st_size > 0:
                     out.write(p.read_bytes())
-
-        if count_lines_quick(final_path, max_lines=3) < 2:
-            try:
-                final_path.unlink()
-            except Exception:
-                pass
-            return (False, "no_results_header_only_after_merge")
 
         ok, reason = validate_header_min_cols(final_path, EXPECTED_MIN_COLS)
         if not ok:
@@ -589,7 +554,7 @@ def fetch_page_to_partfile(
             if not first_nonempty_seen:
                 first_nonempty_seen = True
                 if is_first:
-                    fh.write(line + "\n")  # header
+                    fh.write(line + "\n")
                 continue
             fh.write(line + "\n")
             data_lines += 1
@@ -615,14 +580,29 @@ def download_big_parallel_pages(
     year: int,
     year_dir: Path,
     page_workers: int,
+    resume: bool,
 ) -> Tuple[str, int, bool, str, Optional[Dict]]:
+    final_path = year_dir / f"company_id={company_id}.csv"
+
+    if resume and final_path.exists() and final_path.stat().st_size > 0:
+        ok, reason = validate_header_min_cols(final_path, EXPECTED_MIN_COLS)
+        if ok:
+            audit = {
+                "company_id": company_id,
+                "year": year,
+                "path": str(final_path),
+                "bytes": int(final_path.stat().st_size),
+                "sha256": sha256_file(final_path),
+                "mode": "resume_skip_existing",
+            }
+            return (company_id, year, True, "skipped_existing_valid", audit)
+
     start = time.perf_counter()
 
     pages = int(math.ceil(expected_total / PAGE_LIMIT))
     if pages <= 0:
         return (company_id, year, False, "bad_expected_total", None)
 
-    final_path = year_dir / f"company_id={company_id}.csv"
     parts_root = year_dir / "_parts" / company_id
     ensure_dir(parts_root)
 
@@ -630,7 +610,6 @@ def download_big_parallel_pages(
     offsets = [i * PAGE_LIMIT for i in range(pages)]
 
     total_data_rows = 0
-
     with ThreadPoolExecutor(max_workers=page_workers) as ex:
         futs = {
             ex.submit(
@@ -657,14 +636,6 @@ def download_big_parallel_pages(
     if not ok:
         return (company_id, year, False, msg, None)
 
-    # cleanup best-effort
-    try:
-        for p in part_paths:
-            if p.exists():
-                p.unlink()
-    except Exception:
-        pass
-
     elapsed = time.perf_counter() - start
     audit = {
         "company_id": company_id,
@@ -677,12 +648,7 @@ def download_big_parallel_pages(
         "mode": "big_parallel_pages",
         "pages": int(pages),
     }
-    return (company_id, year, True, f"downloaded_big_ok_pages={pages}_rows~{total_data_rows}", audit)
-
-
-# -------------------------------------------------------------------
-# CORE ORCHESTRATION (single stable function)
-# -------------------------------------------------------------------
+    return (company_id, year, True, f"downloaded_pages={pages}_rows~{total_data_rows}", audit)
 
 
 def _parse_slice(slice_str: Optional[str]) -> Optional[slice]:
@@ -695,22 +661,14 @@ def _parse_slice(slice_str: Optional[str]) -> Optional[slice]:
 
     left, right = s.split(":", 1)
     start = int(left) if left.strip() != "" else None
-
     right = right.strip()
-    if right == "":
-        end = None
-    else:
-        end_int = int(right)
-        end = None if end_int == -1 else end_int
-
+    end = None if right == "" else (None if int(right) == -1 else int(right))
     return slice(start, end)
 
 
 def resolve_dataset_id(dataset: str, year: int) -> str:
-    # For now, only general-payments; later expand to other dataset families.
     if dataset != "general-payments":
         raise ValueError(f"Unsupported dataset '{dataset}'. Supported: {DATASET_CHOICES}")
-
     if year not in YEAR_TO_DATASET_ID:
         raise ValueError(f"Unsupported year {year}. Supported: {sorted(YEAR_TO_DATASET_ID)}")
     return YEAR_TO_DATASET_ID[year]
@@ -722,7 +680,6 @@ def download_year(
     year: int,
     out_root: Path,
     totals_dir: Path,
-    output: str,  # local|s3 (s3 stub for now)
     ensure_totals: bool,
     rescrape_totals: bool,
     max_files: int,
@@ -732,24 +689,14 @@ def download_year(
     totals_limit: int,
     totals_country: str,
     slice_str: Optional[str],
+    resume: bool,
     verbose: bool,
 ) -> Path:
-    """
-    Single stable, testable "download year" function.
-
-    Returns:
-      manifest_path (local path)
-    """
-    if output not in ("local", "s3"):
-        raise ValueError("output must be one of: local, s3")
-
-    # Cap page workers to avoid nested explosion
     page_workers = min(int(page_workers), MAX_PAGE_WORKERS_CAP)
 
     dataset_id = resolve_dataset_id(dataset, year)
     base_url = f"https://openpaymentsdata.cms.gov/api/1/datastore/query/{dataset_id}/download"
 
-    # Totals
     totals_path: Optional[Path] = None
     if ensure_totals:
         totals_path = ensure_totals_for_year(
@@ -767,33 +714,36 @@ def download_year(
             totals_path = latest.path
 
     if not totals_path or not totals_path.exists():
-        raise FileNotFoundError(
-            f"No totals JSON available in {totals_dir}. Enable --ensure-totals or place a totals file there."
-        )
+        raise FileNotFoundError(f"No totals JSON available in {totals_dir}")
 
     run_id = build_run_id(dataset=dataset, year=year, dataset_id=dataset_id, totals_path=totals_path)
-
-    # Logging (needs run_id)
     setup_logging(out_root=out_root, run_id=run_id, verbose=verbose)
 
-    logging.info("Run start: dataset=%s year=%s output=%s run_id=%s", dataset, year, output, run_id)
-    logging.info("Dataset ID: %s", dataset_id)
-    logging.info("Download URL: %s", base_url)
-    logging.info("Totals used: %s", totals_path.resolve())
-    logging.info("Workers: id_workers=%d page_workers=%d (capped=%d)", id_workers, page_workers, MAX_PAGE_WORKERS_CAP)
+    started_at = utc_now_iso()
+    run_start_perf = time.perf_counter()
 
-    run_started = time.perf_counter()
-    manifest_dir = get_metadata_run_dir(out_root, run_id)
-    ensure_dir(manifest_dir)
+    run_dir = get_run_dir(out_root, run_id)
+    ensure_dir(run_dir)
+    manifest_path = run_dir / "manifest.json"
 
-    # Load totals and build tasks
+    # Write an initial "running" manifest (useful for crash recovery)
+    write_json(
+        manifest_path,
+        {
+            "run_id": run_id,
+            "dataset": dataset,
+            "year": year,
+            "dataset_id": dataset_id,
+            "status": "running",
+            "started_at_utc": started_at,
+            "totals_file": str(totals_path),
+        },
+    )
+
     df = load_company_totals_json(totals_path)
     total_col = f"total_{year}"
     if total_col not in df.columns:
-        raise SystemExit(
-            f"Totals JSON ({totals_path.name}) missing required column: {total_col}. "
-            f"Try --rescrape-totals or let it merge the year automatically."
-        )
+        raise SystemExit(f"Totals JSON missing required column: {total_col}")
 
     temp = df[["company_id", total_col]].copy()
     temp[total_col] = temp[total_col].fillna(0).astype(int)
@@ -801,77 +751,48 @@ def download_year(
 
     tasks: List[Tuple[str, int]] = [(r["company_id"], int(r[total_col])) for _, r in temp.iterrows()]
 
-    # Slice
     if slice_str:
         sl = _parse_slice(slice_str)
         tasks = tasks[sl] if sl is not None else tasks
         logging.info("Applied slice=%s -> tasks=%d", slice_str, len(tasks))
 
-    # max_files
     if max_files and max_files > 0:
         tasks = tasks[:max_files]
         logging.info("Applied max_files=%d -> tasks=%d", max_files, len(tasks))
 
-    if not tasks:
-        logging.warning("No tasks to run.")
-        # Still write manifest
-        manifest_path = manifest_dir / "manifest.json"
-        write_manifest(
-            manifest_path,
-            {
-                "run_id": run_id,
-                "dataset": dataset,
-                "year": year,
-                "dataset_id": dataset_id,
-                "output": output,
-                "status": "no_tasks",
-                "started_at_utc": utc_now_iso(),
-                "finished_at_utc": utc_now_iso(),
-                "tasks_total": 0,
-                "tasks_ok": 0,
-                "tasks_failed": 0,
-            },
-        )
-        return manifest_path
-
-    # Output directories
     year_dir = get_year_dir(out_root, dataset, year)
     ensure_dir(year_dir)
 
-    # Session pool sizing (per-thread sessions use this adapter pool)
     pool_size = max(id_workers, page_workers) * 3
 
     results_rows: List[Dict] = []
     audits_ok: List[Dict] = []
 
-    with ThreadPoolExecutor(max_workers=id_workers) as ex:
-        futs = {}
-        for company_id, expected_total in tasks:
-            # Each worker thread will create/get its own session
-            fut = ex.submit(
-                _download_company_job,
-                dataset=dataset,
-                year=year,
-                company_id=company_id,
-                expected_total=expected_total,
-                base_url=base_url,
-                year_dir=year_dir,
-                pool_size=pool_size,
-                page_workers=page_workers,
+    def _job(company_id: str, expected_total: int):
+        session = get_thread_session(pool_size=pool_size)
+        if expected_total <= PAGE_LIMIT:
+            return download_small_sequential(
+                session=session, url=base_url, company_id=company_id, year=year, year_dir=year_dir, resume=resume
             )
-            futs[fut] = (company_id, expected_total)
+        return download_big_parallel_pages(
+            session=session,
+            url=base_url,
+            company_id=company_id,
+            expected_total=expected_total,
+            year=year,
+            year_dir=year_dir,
+            page_workers=page_workers,
+            resume=resume,
+        )
+
+    with ThreadPoolExecutor(max_workers=id_workers) as ex:
+        futs = {ex.submit(_job, cid, exp): (cid, exp) for cid, exp in tasks}
 
         for fut in tqdm(as_completed(futs), total=len(futs), desc=f"Downloading ({dataset}:{year})", unit="job"):
-            company_id, expected_total = futs[fut]
+            cid, expected_total = futs[fut]
             try:
-                cid, y, ok, msg, audit = fut.result()
-                row = {
-                    "company_id": cid,
-                    "year": y,
-                    "expected_total": expected_total,
-                    "ok": bool(ok),
-                    "message": msg,
-                }
+                company_id, y, ok, msg, audit = fut.result()
+                row = {"company_id": company_id, "year": y, "expected_total": expected_total, "ok": bool(ok), "message": msg}
                 if audit:
                     row.update(
                         {
@@ -880,48 +801,37 @@ def download_year(
                             "rows_estimate": audit.get("rows_estimate"),
                             "elapsed_seconds": audit.get("elapsed_seconds"),
                             "mode": audit.get("mode"),
-                            "pages": audit.get("pages", None),
+                            "pages": audit.get("pages"),
                             "path": audit.get("path"),
                         }
                     )
                     audits_ok.append(audit)
                 results_rows.append(row)
             except Exception as e:
-                results_rows.append(
-                    {
-                        "company_id": company_id,
-                        "year": year,
-                        "expected_total": expected_total,
-                        "ok": False,
-                        "message": f"executor_error:{e}",
-                    }
-                )
+                results_rows.append({"company_id": cid, "year": year, "expected_total": expected_total, "ok": False, "message": f"executor_error:{e}"})
 
-    # Write reports
-    report_path = manifest_dir / f"download_report_{dataset}_{year}.csv"
+    report_path = run_dir / f"download_report_{dataset}_{year}.csv"
     pd.DataFrame(results_rows).to_csv(report_path, index=False)
 
-    audits_path = manifest_dir / f"file_audits_{dataset}_{year}.jsonl"
-    ensure_dir(audits_path.parent)
+    audits_path = run_dir / f"file_audits_{dataset}_{year}.jsonl"
     with audits_path.open("w", encoding="utf-8") as f:
         for a in audits_ok:
             f.write(json.dumps(a, sort_keys=True) + "\n")
 
-    # Summarize
     ok_count = sum(1 for r in results_rows if r.get("ok") is True)
     fail_count = len(results_rows) - ok_count
-    elapsed_total = time.perf_counter() - run_started
 
-    # Manifest
-    manifest = {
+    finished_at = utc_now_iso()
+    elapsed_total = time.perf_counter() - run_start_perf
+
+    final_manifest = {
         "run_id": run_id,
         "dataset": dataset,
         "year": year,
         "dataset_id": dataset_id,
-        "output": output,
         "status": "completed" if fail_count == 0 else "completed_with_failures",
-        "started_at_utc": utc_now_iso(),
-        "finished_at_utc": utc_now_iso(),
+        "started_at_utc": started_at,
+        "finished_at_utc": finished_at,
         "elapsed_seconds": round(elapsed_total, 4),
         "tasks_total": int(len(results_rows)),
         "tasks_ok": int(ok_count),
@@ -930,141 +840,35 @@ def download_year(
         "year_dir": str(year_dir),
         "report_csv": str(report_path),
         "audits_jsonl": str(audits_path),
-        "notes": {
-            "page_workers_capped_to": MAX_PAGE_WORKERS_CAP,
-            "expected_min_cols": EXPECTED_MIN_COLS,
-            "page_limit": PAGE_LIMIT,
-        },
+        "notes": {"page_workers_capped_to": MAX_PAGE_WORKERS_CAP, "expected_min_cols": EXPECTED_MIN_COLS, "page_limit": PAGE_LIMIT},
     }
+    write_json(manifest_path, final_manifest)
 
-    manifest_path = manifest_dir / "manifest.json"
-    write_manifest(manifest_path, manifest)
-
-    logging.info("Report saved: %s", report_path.resolve())
-    logging.info("Audits saved: %s", audits_path.resolve())
     logging.info("Manifest saved: %s", manifest_path.resolve())
-
-    # S3 output is a stub for now—kept for CLI contract compatibility.
-    if output == "s3":
-        logging.warning("output=s3 requested, but S3 writer is not implemented yet. Files were written locally.")
-
     return manifest_path
 
 
-def _download_company_job(
-    *,
-    dataset: str,
-    year: int,
-    company_id: str,
-    expected_total: int,
-    base_url: str,
-    year_dir: Path,
-    pool_size: int,
-    page_workers: int,
-) -> Tuple[str, int, bool, str, Optional[Dict]]:
-    # Thread-safe: each worker has its own session
-    session = get_thread_session(pool_size=pool_size)
-
-    if expected_total <= PAGE_LIMIT:
-        return download_small_sequential(
-            session=session,
-            url=base_url,
-            company_id=company_id,
-            year=year,
-            year_dir=year_dir,
-        )
-
-    return download_big_parallel_pages(
-        session=session,
-        url=base_url,
-        company_id=company_id,
-        expected_total=expected_total,
-        year=year,
-        year_dir=year_dir,
-        page_workers=page_workers,
-    )
-
-
-# -------------------------------------------------------------------
-# CLICK CLI
-# -------------------------------------------------------------------
-
-
+# -----------------------------
+# CLI
+# -----------------------------
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
-@click.option(
-    "--dataset",
-    type=click.Choice(DATASET_CHOICES, case_sensitive=False),
-    required=True,
-    help="Dataset name (currently supported: general-payments).",
-)
-@click.option("--year", type=int, required=True, help="Year to download (e.g., 2023).")
-@click.option(
-    "--output",
-    type=click.Choice(["local", "s3"], case_sensitive=False),
-    default="local",
-    show_default=True,
-    help="Write output to local disk or S3 (S3 is stub for now).",
-)
-@click.option("--out-root", type=click.Path(path_type=Path), default=".", show_default=True, help="Output root directory.")
-@click.option(
-    "--totals-dir",
-    type=click.Path(path_type=Path),
-    default="./metadata",
-    show_default=True,
-    help="Directory to store totals JSON cache files.",
-)
-@click.option("--ensure-totals/--no-ensure-totals", default=True, show_default=True, help="Ensure totals JSON exists/is fresh.")
-@click.option("--rescrape-totals", is_flag=True, help="Force re-scrape totals even if a fresh totals file exists.")
-@click.option("--max-files", type=int, default=0, show_default=True, help="Limit number of company CSV files to download (0 = no limit).")
-@click.option("--id-workers", type=int, default=10, show_default=True, help="Concurrency for company-level downloads.")
-@click.option(
-    "--page-workers",
-    type=int,
-    default=5,
-    show_default=True,
-    help=f"Concurrency for page-level parallel downloads (big companies). Capped at {MAX_PAGE_WORKERS_CAP}.",
-)
-@click.option("--totals-workers", type=int, default=10, show_default=True, help="Concurrency used when scraping totals JSON.")
-@click.option("--totals-limit", type=int, default=100, show_default=True, help="How many company IDs to fetch in totals scraper (testing knob).")
-@click.option("--totals-country", type=str, default="UNITED STATES", show_default=True, help="Country filter for totals scraper.")
-@click.option("--slice", "slice_str", type=str, default=None, help="Optional slice like '0:20' or '20:40' or '20'.")
-@click.option("--verbose", is_flag=True, help="Verbose logging.")
-def cli(
-    dataset: str,
-    year: int,
-    output: str,
-    out_root: Path,
-    totals_dir: Path,
-    ensure_totals: bool,
-    rescrape_totals: bool,
-    max_files: int,
-    id_workers: int,
-    page_workers: int,
-    totals_workers: int,
-    totals_limit: int,
-    totals_country: str,
-    slice_str: Optional[str],
-    verbose: bool,
-) -> None:
-    manifest_path = download_year(
-        dataset=dataset.lower(),
-        year=year,
-        out_root=out_root,
-        totals_dir=totals_dir,
-        output=output.lower(),
-        ensure_totals=ensure_totals,
-        rescrape_totals=rescrape_totals,
-        max_files=max_files,
-        id_workers=id_workers,
-        page_workers=page_workers,
-        totals_workers=totals_workers,
-        totals_limit=totals_limit,
-        totals_country=totals_country,
-        slice_str=slice_str,
-        verbose=verbose,
-    )
-
-    # Print the single main artifact path for downstream tools (Airflow, CI, etc.)
+@click.option("--dataset", type=click.Choice(DATASET_CHOICES, case_sensitive=False), required=True)
+@click.option("--year", type=int, required=True)
+@click.option("--out-root", type=click.Path(path_type=Path), default=DEFAULT_OUT_ROOT, show_default=True)
+@click.option("--totals-dir", type=click.Path(path_type=Path), default=DEFAULT_TOTALS_DIR, show_default=True)
+@click.option("--ensure-totals/--no-ensure-totals", default=True, show_default=True)
+@click.option("--rescrape-totals", is_flag=True)
+@click.option("--max-files", type=int, default=0, show_default=True)
+@click.option("--id-workers", type=int, default=10, show_default=True)
+@click.option("--page-workers", type=int, default=5, show_default=True)
+@click.option("--totals-workers", type=int, default=10, show_default=True)
+@click.option("--totals-limit", type=int, default=100, show_default=True)
+@click.option("--totals-country", type=str, default="UNITED STATES", show_default=True)
+@click.option("--slice", "slice_str", type=str, default=None)
+@click.option("--resume/--no-resume", default=True, show_default=True, help="Skip already-downloaded valid files.")
+@click.option("--verbose", is_flag=True)
+def cli(**kwargs) -> None:
+    manifest_path = download_year(**kwargs)
     click.echo(str(manifest_path.resolve()))
 
 
