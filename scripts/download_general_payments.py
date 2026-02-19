@@ -23,8 +23,9 @@ from requests.adapters import HTTPAdapter
 from tqdm import tqdm
 from urllib3.util.retry import Retry
 
-import recordstotal  # expects build_totals_json(...)
-import datasetid
+from scripts import recordstotal
+from scripts import datasetid
+
 
 # -----------------------------
 # Repo-aware defaults (/scripts)

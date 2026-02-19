@@ -11,7 +11,7 @@ This guide covers:
 SSH in:
 
 ```bash
-ssh -i /path/to/your-key.pem ec2-user@<EC2_PUBLIC_IP>
+ssh -i /home/lordjames/.ssh/openpayments ec2-user@ec2-54-219-26-50.us-west-1.compute.amazonaws.com
 ```
 
 Go to the repo and pull:
