@@ -11,6 +11,7 @@ wheels/
 # Data folders
 data/
 out/
+Social contents/
 
 # Virtual environments
 .venv/

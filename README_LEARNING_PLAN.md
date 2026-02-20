@@ -1,107 +1,108 @@
-# Data Engineering Zoomcamp (AWS-Focused) — Learning Plan
+# Data Engineering Zoomcamp (AWS-Focused) — Learning Plan (Updated: dbt + Bruin)
 
 ## Why I’m Taking This Course (Even Though I’m Not a Beginner)
 
-I am enrolling in the Data Engineering Zoomcamp by DataTalksClub **intentionally and strategically**.
+I’m using DataTalksClub’s Data Engineering Zoomcamp as a **structured framework** to deepen production thinking and ship a real AWS system around **CMS Open Payments**.
 
 I already work with:
-- Python-based data ingestion
+- Python ingestion + scraping
 - Large CSV datasets
-- AWS services (S3, IAM, EC2, Glue, Athena, Redshift)
+- AWS (S3, IAM, EC2, Athena/Glue/Redshift as needed)
 - Dockerized pipelines
-- Real-world data extraction and transformation
+- Logging, retries, and operational hardening
 
-However, my goal is **not** to repeat beginner material.
-
-My goal is to use this course as:
-- A **structured reference framework**
-- A way to **stress-test my existing knowledge**
-- A guide to **strengthen my systems thinking**
-- A backbone for building a **production-grade AWS data platform**
-
-In short:  
-I am not learning *what tools exist* — I am refining *how and why I use them*.
+My goal isn’t to repeat beginner lessons.
+My goal is to **build a coherent system** and sharpen **how and why** I use tools.
 
 ---
 
 ## How I Will Approach the Zoomcamp
 
-I will complete the full course content, but **not as a beginner**.
-
-Instead of following tutorials verbatim, I will:
-
-- Translate **all GCP examples to AWS**
-- Treat each module as a **design problem**
-- Ask production-level questions such as:
-  - What breaks at scale?
-  - How do I recover from partial failure?
-  - How do I make this observable, repeatable, and auditable?
-- Extend each concept beyond the minimum required by the course
+I will:
+- Translate GCP patterns into AWS equivalents (S3/Athena/Glue/Redshift, etc.)
+- Treat each module as a **design problem**, not a tutorial
+- Push for production concerns:
+  - idempotency, restart safety, backfills
+  - auditability + metadata as first-class outputs
+  - cost-awareness and operability
 
 The Zoomcamp is my **specification**, not my instructor.
 
 ---
 
-## My Learning Philosophy for This Course
+## Updated Modules I’m Adding (dbt + Bruin) and Why They Matter
 
-I will focus on:
+### Analytics Engineering (dbt)
+**Why it’s essential:**
+- Clean separation between **raw/staged** data engineering work and **analytics-ready** modeling
+- Standard approach to:
+  - transformations as code
+  - tests + documentation
+  - repeatable deployments
 
-### 1. Systems, Not Scripts
-I am not interested in one-off scripts.
-Every component I build must fit into a larger, end-to-end system.
+**How I’ll use it in this project:**
+- dbt models for:
+  - `payments_fact`
+  - `physicians_dim`
+  - `companies_dim`
+- dbt tests for:
+  - not_null / unique keys
+  - accepted values (where appropriate)
+  - relationship tests (fact ↔ dims)
+- Targets:
+  - **DuckDB** locally for rapid iteration
+  - **Redshift** (or alternative) when warehouse is enabled
 
-### 2. Production Thinking
-I will design for:
-- Idempotency
-- Retry safety
-- Backfills
-- Schema evolution
-- Data quality checks
-- Cost awareness
+### Data Platform Orchestration (Bruin)
+**Why it’s worth learning (even if Airflow is “the standard”):**
+- Bruin focuses on **end-to-end pipeline definitions**, quality hooks, and deployment patterns
+- It’s useful to compare “workflow-first” vs “pipeline-first” ergonomics
 
-### 3. AWS Fluency
-This course will help me strengthen:
-- AWS-native architecture thinking
-- Trade-offs between services
-- When *not* to use certain tools
+**How I’ll use it:**
+- Keep Airflow as the baseline orchestrator (industry standard, open source)
+- Add a minimal Bruin pipeline that runs the same steps so I can compare:
+  - local dev experience
+  - configuration, environments, secrets
+  - quality checks integration
+  - deployment story
 
-### 4. Depth Over Speed
-I am optimizing for **long-term mastery**, not course completion speed.
-
----
-
-## How I Will Use Each Zoomcamp Module
-
-| Zoomcamp Topic | How I Will Use It |
-|---------------|------------------|
-| Docker & SQL | As a production runtime and staging layer |
-| Ingestion | Hardened, logged, auditable ingestion pipelines |
-| Airflow | Orchestration, recovery, and operational control |
-| Data Warehouse | Redshift + Athena design trade-offs |
-| Spark | Large-scale batch transformations with schema enforcement |
-| Terraform | Reproducible AWS infrastructure |
-| Data Quality | Detecting silent failures and schema drift |
-
----
-
-## What Success Looks Like for Me
-
-By the end of this Zoomcamp, I expect to have:
-
-- A **real AWS data engineering capstone**, not a toy project
-- A deep understanding of **end-to-end batch analytics systems**
-- Clear architectural opinions I can explain and defend
-- Production-ready code I can point to
-- Meaningful technical insights to share publicly (LinkedIn, GitHub)
+**Decision goal:**
+- Airflow remains the primary orchestrator in the capstone
+- Bruin becomes a learning comparison artifact (documented trade-offs)
 
 ---
 
-## Public Learning & Knowledge Sharing
+## How I Will Use Each Zoomcamp Module (Updated)
 
-As I progress, I will:
-- Share architecture insights (not “I learned X” posts)
-- Document failures, trade-offs, and design decisions
-- Treat learning as part of my professional identity
+| Zoomcamp Area | How I’ll Apply It (AWS-Focused) |
+|---|---|
+| Docker & SQL | Reproducible runtime + local validation |
+| Ingestion | Restart-safe downloads, audited and logged |
+| Orchestration (Airflow) | Scheduling, retries, backfills, operational control |
+| Analytics Engineering (dbt) | Modeling + tests + docs for curated analytics tables |
+| Data Platforms (Bruin) | Comparison: pipeline-centric orchestration + quality patterns |
+| Batch (Spark) | Large-scale transforms, schema enforcement, incremental patterns |
+| Streaming (Kafka) | Optional extension; small demo pipeline if time allows |
+| Terraform | Reproducible AWS infra (S3, IAM, EC2, networking) |
+| Data Quality | Detect silent failures; enforce schema + row-count invariants |
 
-This course is not a checkbox.
-It is a **tool to sharpen how I already work as a data engineer**.
+---
+
+## What Success Looks Like
+
+By the end of the Zoomcamp, I will have:
+- A real AWS capstone: **Open Payments data platform**
+- A production-minded ingestion system with strong audit trails
+- A curated analytics layer with **dbt models + tests**
+- Orchestration implemented in **Airflow**, with a **Bruin comparison** documented
+- A portfolio-ready README + architecture diagram + runbook
+
+---
+
+## Public Learning (Optional Output)
+
+I’ll share **design decisions** and trade-offs, not “I learned X” posts:
+- idempotency patterns, manifest strategy
+- why modeling decisions were chosen
+- orchestration trade-offs (Airflow vs Bruin)
+- how tests changed confidence in data

@@ -1,181 +1,144 @@
-# AWS Capstone Project — CMS Open Payments Data Platform
+# AWS Capstone Project — CMS Open Payments Data Platform (Updated: dbt + Bruin)
 
-## Why I Am Defining the Project First
+## Goal
 
-I am starting this Zoomcamp by **designing my capstone upfront**.
+Build a **production-style AWS data platform** that ingests, audits, transforms, and serves **CMS Open Payments** data for analytics.
 
-I believe the fastest way to waste a strong course is to:
-- Learn tools in isolation
-- Build disconnected mini-projects
-- Decide on a capstone at the end
-
-Instead, I am **reverse-engineering my learning from a real project**.
-
-Every concept I study in the Zoomcamp will directly support this single system.
+This is not a demo. It’s an operational system with:
+- deterministic runs
+- audit-friendly metadata
+- clear lifecycle zones
+- repeatable infrastructure
 
 ---
 
-## Project Goal
+## Why Open Payments
 
-To design and implement a **production-style AWS data engineering platform** that ingests, validates, transforms, and serves **CMS Open Payments** data for analytics.
-
-This project reflects:
-- Real data volume
-- Real schema inconsistency
-- Real operational challenges
-- Real architectural trade-offs
-
-This is not a demo.
-It is a system I should be able to explain, maintain, and evolve.
+The dataset is ideal for real-world engineering because it:
+- is large and multi-year
+- arrives as CSV with practical edge cases
+- contains schema drift and messy constraints
+- benefits from strong auditing and testing
+- maps well to analytics use cases (companies, physicians, payments)
 
 ---
 
-## Why CMS Open Payments Data
+## Architecture (Current → Target)
 
-I chose this dataset intentionally because it:
+### Current (already working)
+1. Download CSVs (company-level)
+2. Write local run artifacts (manifest, audits, logs)
+3. Upload to S3 raw zone (idempotent, skip-safe)
 
-- Is large and multi-year
-- Comes in raw CSV form
-- Has schema drift and inconsistencies
-- Requires validation and auditing
-- Represents a real analytics use case
-
-This makes it ideal for practicing **real-world data engineering**, not toy pipelines.
-
----
-
-## High-Level Architecture (Final State)
-
-### Data Flow Overview
-
-1. Raw CSV files downloaded or ingested
-2. Stored in S3 as immutable raw data
-3. Validated and audited
-4. Transformed using Spark
-5. Stored as curated datasets
-6. Queried via Athena and Redshift
-7. Orchestrated end-to-end with Airflow
-8. Provisioned via Terraform
+### Target (full platform)
+1. **Raw ingestion** → S3 `raw/`
+2. **Staging/validation** → S3 `staging/` + quarantine
+3. **Transform** (Spark/Glue/EMR as needed) → S3 `curated/`
+4. **Warehouse** (optional) → Redshift
+5. **Analytics modeling** (dbt) → analytics-ready marts
+6. **Orchestration** (Airflow primary; Bruin comparison) manages end-to-end runs
+7. **Observability** via metadata + logs + run manifests
 
 ---
 
 ## Storage Design (S3)
 
-S3 will act as the **single source of truth**.
+S3 is the system of record with explicit lifecycle zones:
 
-├── raw/
-│ ├── year=2019/
-│ ├── year=2020/
-│ └── year=2021/
-├── staging/
-│ ├── validated/
-│ └── rejected/
-├── curated/
-│ ├── payments_fact/
-│ ├── physicians_dim/
-│ └── companies_dim/
-└── metadata/
-├── ingestion_audit/
-└── schema_versions/
+- `raw/` (immutable, never edited)
+- `staging/` (validated, normalized, quarantine)
+- `curated/` (analytics-ready parquet/csv outputs)
+- `metadata/` (run manifests, audits, schema versions, logs)
 
-
-This structure supports:
-- Replayability
-- Auditability
-- Cost control
-- Clear data lifecycle boundaries
+Example (aligned to your current structure):
+- `raw/dataset=general-payments/year=2024/company_id=...csv`
+- `metadata/runs/run_id=.../manifest.json`
+- `metadata/runs/run_id=.../file_audits_...jsonl`
+- `metadata/logs/...log`
 
 ---
 
-## Processing & Transformation
+## Orchestration Strategy (Airflow + Bruin)
 
-- Python for ingestion and validation
-- Spark (AWS Glue or EMR) for batch transformations
-- Schema enforcement and normalization
-- Bad record quarantine
-- Incremental processing where possible
-
----
-
-## Orchestration Strategy
-
-Airflow will manage:
-- Year-based ingestion
-- Validation steps
-- Transformation jobs
-- Warehouse loads
+### Airflow (primary)
+Airflow orchestrates:
+- ingestion (download → upload)
+- validation + data quality checks
+- transformation jobs
+- optional warehouse loads
+- dbt runs/tests (later stage)
 
 Key principles:
-- Idempotent tasks
-- Safe retries
-- Backfills
-- Parameterized DAGs
+- idempotent tasks
+- safe retries
+- backfills
+- parameterized DAGs (`dataset`, `year`, `run_id`)
+
+### Bruin (comparison module)
+Bruin is used to learn:
+- pipeline-centric definitions
+- built-in quality patterns
+- deployment workflow
+
+Outcome:
+- Keep Airflow as the “capstone default”
+- Document why/when Bruin might be preferred in other contexts
 
 ---
 
-## Analytics Layer
+## Analytics Engineering (dbt)
 
-- **Athena**
-  - Exploratory queries
-  - Validation checks
-  - Cheap access to raw and staged data
+dbt will manage the “analytics contract”:
+- models (facts/dims/marts)
+- tests (not_null, unique, relationships, accepted values)
+- documentation
 
-- **Redshift**
-  - Curated fact and dimension tables
-  - Analytics-ready datasets
-  - BI and reporting use cases
-
----
-
-## Infrastructure as Code
-
-Terraform will be used to provision:
-- S3 buckets
-- IAM roles and policies
-- EC2 / Airflow runtime
-- Redshift resources
-
-This ensures:
-- Reproducibility
-- Clean teardown
-- Environment separation (dev / prod)
+Targets:
+- Local iteration: DuckDB (fast feedback loop)
+- Cloud/warehouse: Redshift (when enabled)
 
 ---
 
-## Data Quality & Monitoring
+## Batch Transformations (Spark)
 
-This project will include:
-- File-level ingestion audits
-- Row count checks
-- Schema validation
-- Detection of missing or corrupt files
-- Clear separation of valid vs rejected data
+Spark is used for:
+- schema enforcement
+- normalization
+- incremental processing across large years
+- writing curated partitions to S3
 
-Failures should be **visible and explainable**, not silent.
-
----
-
-## How This Project Guides My Learning
-
-Every Zoomcamp topic maps directly to this system:
-
-- Docker → ingestion runtime
-- SQL → validation and analytics
-- Airflow → orchestration and recovery
-- Spark → large-scale transformations
-- Terraform → reproducible AWS infra
-- Data quality → system reliability
-
-This keeps my learning **focused, cumulative, and practical**.
+Execution options:
+- local Spark for dev
+- AWS Glue or EMR for scalable runs (later stage)
 
 ---
 
-## How I Will Share This Project Publicly
+## Data Quality & Reliability
 
-I plan to:
-- Share design decisions, not just outcomes
-- Document trade-offs and lessons learned
-- Treat this project as a long-term reference system
-- Use it as a portfolio anchor and interview discussion point
+Quality is enforced through:
+- file audits (size, checksum, status)
+- row-count invariants and drift checks
+- schema drift detection
+- quarantine zone for rejected records
+- dbt tests for warehouse-layer confidence
 
-This project is how I ensure the Zoomcamp makes me **better at what I already do**, not just more familiar with tools.
+---
+
+## Infrastructure as Code (Terraform)
+
+Terraform provisions:
+- VPC + subnet + routing
+- EC2 runner instance
+- S3 bucket(s)
+- IAM roles/policies (EC2 instance profile)
+- (later) supporting services (e.g., Redshift, managed Airflow alternatives if needed)
+
+---
+
+## Deliverables (Portfolio Standard)
+
+- End-to-end runnable project (Docker + Airflow)
+- Terraform-based infra reproduction
+- Clear S3 layout and metadata contract
+- dbt project with models/tests/docs (when warehouse is enabled)
+- “Why” documentation: trade-offs, cost choices, failure modes
