@@ -1,33 +1,41 @@
 from __future__ import annotations
 
 import json
-import sys
 from datetime import datetime
 from pathlib import Path
 
 from airflow import DAG
-from airflow.decorators import task
-from airflow.models.param import Param
-from airflow.operators.empty import EmptyOperator
-from airflow.operators.python import get_current_context
+from airflow.sdk import Param, get_current_context, task
+from airflow.providers.docker.operators.docker import DockerOperator
+from airflow.providers.standard.operators.empty import EmptyOperator
+from airflow.providers.standard.operators.python import ShortCircuitOperator
 
-# Repo mount inside container (per docker-compose volume: - ..:/opt/project)
+# Airflow container mounts your repo at /opt/project (from compose: - ..:/opt/project)
 PROJECT_ROOT = Path("/opt/project")
-OUT_ROOT = PROJECT_ROOT / "data" / "out"
-TOTALS_DIR = PROJECT_ROOT / "data" / "totals"
+HOST_DATA_DIR = PROJECT_ROOT / "data"  # host path visible inside Airflow containers
 
-DEFAULT_BUCKET = "openpayments-dezoomcamp2026-us-west-1-1f83ec"  # change if needed
+# Container paths (inside your pipeline image)
+CONTAINER_WORKDIR = "/app"
+CONTAINER_DATA_DIR = "/app/data"
+CONTAINER_OUT_ROOT = "/app/data/out"
+CONTAINER_TOTALS_DIR = "/app/data/totals"
+
+DEFAULT_IMAGE = "data-engineering-zoomcamp-openpayments:latest"
+DEFAULT_BUCKET = "openpayments-dezoomcamp2026-us-west-1-1f83ec"
 
 with DAG(
-    dag_id="openpayments_phase3_download_validate_upload",
+    dag_id="openpayments_phase3_docker_download_validate_upload",
     start_date=datetime(2025, 1, 1),
     schedule=None,
     catchup=False,
-    tags=["openpayments", "phase3"],
+    tags=["openpayments", "phase3", "docker"],
     params={
-        # Download params
+        # image
+        "image": Param(DEFAULT_IMAGE, type="string"),
+
+        # download params
         "year": Param(2023, type="integer", minimum=2018, maximum=2035),
-        "max_files": Param(0, type="integer", minimum=0, maximum=100000),
+        "max_files": Param(2, type="integer", minimum=0, maximum=100000),
         "ensure_totals": Param(True, type="boolean"),
         "id_workers": Param(10, type="integer", minimum=1, maximum=50),
         "page_workers": Param(5, type="integer", minimum=1, maximum=10),
@@ -37,7 +45,7 @@ with DAG(
         "resume": Param(True, type="boolean"),
         "verbose": Param(False, type="boolean"),
 
-        # Upload params (EC2/role-driven)
+        # upload params
         "upload_to_s3": Param(False, type="boolean"),
         "bucket": Param(DEFAULT_BUCKET, type="string"),
         "overwrite": Param(False, type="boolean"),
@@ -52,51 +60,64 @@ with DAG(
     start = EmptyOperator(task_id="start")
     end = EmptyOperator(task_id="end")
 
-    @task(retries=2)
-    def download() -> str:
-        """
-        Runs downloader and returns manifest path.
-        Uses Airflow run_id as the pipeline run_id (lineage).
-        """
-        ctx = get_current_context()
-        params = ctx["params"]
-        airflow_run_id = ctx["run_id"]
+    # --- Task 1: Download in pipeline container ---
+    # We run your downloader script directly in the pipeline image (no Airflow Python deps involved)
+    download = DockerOperator(
+        task_id="download_in_container",
+        image="{{ params.image }}",
+        api_version="auto",
+        auto_remove=True,
+        docker_url="unix://var/run/docker.sock",
+        network_mode="bridge",
+        working_dir=CONTAINER_WORKDIR,
+        entrypoint="python",
+        command=[
+            "scripts/download_general_payments.py",
+            "--dataset", "general-payments",
+            "--year", "{{ params.year }}",
+            "--out-root", CONTAINER_OUT_ROOT,
+            "--totals-dir", CONTAINER_TOTALS_DIR,
+            "{{ '--ensure-totals' if params.ensure_totals else '--no-ensure-totals' }}",
+            "--max-files", "{{ params.max_files }}",
+            "--id-workers", "{{ params.id_workers }}",
+            "--page-workers", "{{ params.page_workers }}",
+            "--totals-workers", "{{ params.totals_workers }}",
+            "--totals-limit", "{{ params.totals_limit }}",
+            "--totals-country", "{{ params.totals_country }}",
+            "{{ '--resume' if params.resume else '--no-resume' }}",
+            "{{ '--verbose' if params.verbose else '' }}",
+            # Airflow-run lineage id:
+            "--run-id", "{{ run_id }}",
+            # Airflow-friendly logging/less noise:
+            "--airflow-mode",
+            "--no-progress",
+        ],
+        volumes=[
+            # Mount host ./data into container /app/data
+            f"{HOST_DATA_DIR}:{CONTAINER_DATA_DIR}",
+        ],
+    )
 
-        sys.path.insert(0, str(PROJECT_ROOT))
-        from scripts.download_general_payments import download_year  # noqa
-
-        manifest_path = download_year(
-            dataset="general-payments",
-            year=int(params["year"]),
-            out_root=OUT_ROOT,
-            totals_dir=TOTALS_DIR,
-            ensure_totals=bool(params["ensure_totals"]),
-            rescrape_totals=False,
-            max_files=int(params["max_files"]),
-            id_workers=int(params["id_workers"]),
-            page_workers=int(params["page_workers"]),
-            totals_workers=int(params["totals_workers"]),
-            totals_limit=int(params["totals_limit"]),
-            totals_country=str(params["totals_country"]),
-            slice_str=None,
-            resume=bool(params["resume"]),
-            verbose=bool(params["verbose"]),
-            run_id=airflow_run_id,
-            airflow_mode=True,
-            no_progress=True,
-        )
-        return str(Path(manifest_path).resolve())
-
+    # --- Task 2: Validate manifest on host-mounted data folder (fast + deterministic) ---
     @task
-    def validate(manifest_path: str) -> str:
-        """
-        Validates manifest and key artifacts exist.
-        """
-        mp = Path(manifest_path)
-        if not mp.exists():
-            raise FileNotFoundError(f"Manifest not found: {mp}")
+    def validate_manifest() -> str:
+        ctx = get_current_context()
+        run_id = ctx["run_id"]
 
-        manifest = json.loads(mp.read_text())
+        manifest_path = (
+            PROJECT_ROOT
+            / "data"
+            / "out"
+            / "metadata"
+            / "runs"
+            / f"run_id={run_id}"
+            / "manifest.json"
+        )
+
+        if not manifest_path.exists():
+            raise FileNotFoundError(f"Manifest not found: {manifest_path}")
+
+        manifest = json.loads(manifest_path.read_text())
         status = manifest.get("status")
         if status not in {"completed", "completed_with_failures"}:
             raise ValueError(f"Unexpected manifest status: {status}")
@@ -111,70 +132,61 @@ with DAG(
         if int(manifest.get("tasks_total", 0)) <= 0:
             raise ValueError("tasks_total <= 0; expected at least 1 task.")
 
-        return manifest_path
+        return str(manifest_path)
 
-    @task(retries=2)
-    def upload_to_s3(manifest_path: str) -> str:
-        """
-        Optional upload step. Skips unless params['upload_to_s3'] is True.
+    validated_manifest = validate_manifest()
+    validated_manifest.set_upstream(download)
 
-        Runs the existing uploader script as a callable Click app.
-        This should work on EC2 using the instance IAM role (no secrets in Git).
-        """
-        ctx = get_current_context()
-        params = ctx["params"]
+    # --- Gate: only upload when upload_to_s3 == true ---
+    should_upload = ShortCircuitOperator(
+        task_id="should_upload",
+        python_callable=lambda **kwargs: bool(kwargs["params"]["upload_to_s3"]),
+    )
+    should_upload.set_upstream(validated_manifest)
 
-        if not bool(params["upload_to_s3"]):
-            return "SKIPPED: upload_to_s3=false"
+    # --- Task 3: Upload in pipeline container (optional) ---
+    upload = DockerOperator(
+        task_id="upload_in_container",
+        image="{{ params.image }}",
+        api_version="auto",
+        auto_remove=True,
+        docker_url="unix://var/run/docker.sock",
+        network_mode="bridge",
+        working_dir=CONTAINER_WORKDIR,
+        entrypoint="python",
+        command=[
+            "scripts/upload_run_to_s3_full_files.py",
+            "--bucket", "{{ params.bucket }}",
+            "--out-root", CONTAINER_OUT_ROOT,
+            "--totals-dir", CONTAINER_TOTALS_DIR,
+            "{{ '--include-metadata' if params.include_metadata else '--no-include-metadata' }}",
+            "{{ '--include-latest-totals' if params.include_latest_totals else '--no-include-latest-totals' }}",
+            "{{ '--overwrite' if params.overwrite else '--no-overwrite' }}",
+            "{{ '--delete-local' if params.delete_local else '' }}",
+            "{{ '--dry-run' if params.dry_run else '' }}",
+            "{{ '--checksum-metadata' if params.checksum_metadata else '' }}",
+            "{{ '--verbose' if params.verbose else '' }}",
+        ],
+        volumes=[f"{HOST_DATA_DIR}:{CONTAINER_DATA_DIR}"],
+    )
+    upload.set_upstream(should_upload)
 
-        sys.path.insert(0, str(PROJECT_ROOT))
-        from scripts.upload_run_to_s3_full_files import main as upload_main  # noqa
-
-        # Build argv exactly like CLI to keep Click validation behavior
-        argv = [
-            "upload_run_to_s3_full_files.py",
-            "--bucket",
-            str(params["bucket"]),
-            "--out-root",
-            str(OUT_ROOT),
-            "--totals-dir",
-            str(TOTALS_DIR),
-            "--include-metadata" if bool(params["include_metadata"]) else "--no-include-metadata",
-            "--include-latest-totals" if bool(params["include_latest_totals"]) else "--no-include-latest-totals",
-            "--overwrite" if bool(params["overwrite"]) else "--no-overwrite",
-        ]
-
-        if bool(params["delete_local"]):
-            argv.append("--delete-local")
-        if bool(params["dry_run"]):
-            argv.append("--dry-run")
-        if bool(params["checksum_metadata"]):
-            argv.append("--checksum-metadata")
-        if bool(params["verbose"]):
-            argv.append("--verbose")
-
-        # Run uploader
-        sys.argv = argv
-        upload_main(standalone_mode=True)
-
-        return f"OK: uploaded to s3://{params['bucket']}"
-
+    # --- Task 4: Marker ---
     @task
-    def write_airflow_marker(manifest_path: str, upload_result: str) -> str:
-        """
-        Writes a lineage breadcrumb into the run directory.
-        """
+    def write_marker(manifest_path: str) -> str:
         ctx = get_current_context()
-        airflow_run_id = ctx["run_id"]
+        run_id = ctx["run_id"]
+        params = ctx["params"]
 
         mp = Path(manifest_path)
         run_dir = mp.parent
 
         marker = {
-            "airflow_run_id": airflow_run_id,
+            "airflow_run_id": run_id,
             "dag_id": ctx["dag"].dag_id,
             "manifest_path": str(mp),
-            "upload_result": upload_result,
+            "upload_to_s3": bool(params["upload_to_s3"]),
+            "bucket": str(params["bucket"]),
             "written_at_utc": datetime.utcnow().isoformat() + "Z",
         }
 
@@ -182,9 +194,10 @@ with DAG(
         out.write_text(json.dumps(marker, indent=2))
         return str(out)
 
-    mpath = download()
-    validated = validate(mpath)
-    upload_result = upload_to_s3(validated)
-    marker = write_airflow_marker(validated, upload_result)
+    marker = write_marker(validated_manifest)
+    marker.set_upstream(upload)
+    marker.set_upstream(should_upload)  # so marker still runs when upload is skipped
 
-    start >> mpath >> validated >> upload_result >> marker >> end
+    start >> download >> validated_manifest >> should_upload
+    should_upload >> upload
+    marker >> end
