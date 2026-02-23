@@ -9,19 +9,35 @@ from airflow.sdk import Param, get_current_context, task
 from airflow.providers.docker.operators.docker import DockerOperator
 from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.providers.standard.operators.python import ShortCircuitOperator
+from docker.types import Mount
 
-# Airflow container mounts your repo at /opt/project (from compose: - ..:/opt/project)
+# Airflow container mounts your repo at /opt/project (compose: - ..:/opt/project)
 PROJECT_ROOT = Path("/opt/project")
-HOST_DATA_DIR = PROJECT_ROOT / "data"  # host path visible inside Airflow containers
+HOST_DATA_DIR = PROJECT_ROOT / "data"  # exists inside Airflow containers
 
-# Container paths (inside your pipeline image)
+# Container paths (inside your openpayments pipeline image)
 CONTAINER_WORKDIR = "/app"
 CONTAINER_DATA_DIR = "/app/data"
 CONTAINER_OUT_ROOT = "/app/data/out"
 CONTAINER_TOTALS_DIR = "/app/data/totals"
 
-DEFAULT_IMAGE = "data-engineering-zoomcamp-openpayments:latest"
+DEFAULT_IMAGE = "openpayments:latest"  # stable tag (recommended)
 DEFAULT_BUCKET = "openpayments-dezoomcamp2026-us-west-1-1f83ec"
+
+DATA_MOUNT = Mount(
+    source=str(HOST_DATA_DIR),
+    target=CONTAINER_DATA_DIR,
+    type="bind",
+)
+
+
+def _bool_flag(name: str, val: bool) -> str:
+    """
+    Helper: returns CLI flag name if True else empty string.
+    Used for optional click flags like --verbose.
+    """
+    return name if val else ""
+
 
 with DAG(
     dag_id="openpayments_phase3_docker_download_validate_upload",
@@ -30,7 +46,7 @@ with DAG(
     catchup=False,
     tags=["openpayments", "phase3", "docker"],
     params={
-        # image
+        # runtime image
         "image": Param(DEFAULT_IMAGE, type="string"),
 
         # download params
@@ -56,18 +72,17 @@ with DAG(
         "checksum_metadata": Param(False, type="boolean"),
     },
 ) as dag:
-
     start = EmptyOperator(task_id="start")
     end = EmptyOperator(task_id="end")
 
-    # --- Task 1: Download in pipeline container ---
-    # We run your downloader script directly in the pipeline image (no Airflow Python deps involved)
+    # -------------------------
+    # 1) DOWNLOAD (container)
+    # -------------------------
     download = DockerOperator(
         task_id="download_in_container",
         image="{{ params.image }}",
-        api_version="auto",
-        auto_remove=True,
         docker_url="unix://var/run/docker.sock",
+        api_version="auto",
         network_mode="bridge",
         working_dir=CONTAINER_WORKDIR,
         entrypoint="python",
@@ -86,19 +101,19 @@ with DAG(
             "--totals-country", "{{ params.totals_country }}",
             "{{ '--resume' if params.resume else '--no-resume' }}",
             "{{ '--verbose' if params.verbose else '' }}",
-            # Airflow-run lineage id:
+            # lineage
             "--run-id", "{{ run_id }}",
-            # Airflow-friendly logging/less noise:
+            # airflow-friendly logs
             "--airflow-mode",
             "--no-progress",
         ],
-        volumes=[
-            # Mount host ./data into container /app/data
-            f"{HOST_DATA_DIR}:{CONTAINER_DATA_DIR}",
-        ],
+        mounts=[DATA_MOUNT],
+        auto_remove="success",  # Airflow 3: 'never' | 'success' | 'force'
     )
 
-    # --- Task 2: Validate manifest on host-mounted data folder (fast + deterministic) ---
+    # -------------------------
+    # 2) VALIDATE (in Airflow)
+    # -------------------------
     @task
     def validate_manifest() -> str:
         ctx = get_current_context()
@@ -137,20 +152,23 @@ with DAG(
     validated_manifest = validate_manifest()
     validated_manifest.set_upstream(download)
 
-    # --- Gate: only upload when upload_to_s3 == true ---
+    # -------------------------
+    # 3) SHOULD UPLOAD?
+    # -------------------------
     should_upload = ShortCircuitOperator(
         task_id="should_upload",
         python_callable=lambda **kwargs: bool(kwargs["params"]["upload_to_s3"]),
     )
     should_upload.set_upstream(validated_manifest)
 
-    # --- Task 3: Upload in pipeline container (optional) ---
+    # -------------------------
+    # 4) UPLOAD (container)
+    # -------------------------
     upload = DockerOperator(
         task_id="upload_in_container",
         image="{{ params.image }}",
-        api_version="auto",
-        auto_remove=True,
         docker_url="unix://var/run/docker.sock",
+        api_version="auto",
         network_mode="bridge",
         working_dir=CONTAINER_WORKDIR,
         entrypoint="python",
@@ -167,11 +185,14 @@ with DAG(
             "{{ '--checksum-metadata' if params.checksum_metadata else '' }}",
             "{{ '--verbose' if params.verbose else '' }}",
         ],
-        volumes=[f"{HOST_DATA_DIR}:{CONTAINER_DATA_DIR}"],
+        mounts=[DATA_MOUNT],
+        auto_remove="success",  # Airflow 3 compliant
     )
     upload.set_upstream(should_upload)
 
-    # --- Task 4: Marker ---
+    # -------------------------
+    # 5) MARKER (in Airflow)
+    # -------------------------
     @task
     def write_marker(manifest_path: str) -> str:
         ctx = get_current_context()
@@ -195,9 +216,11 @@ with DAG(
         return str(out)
 
     marker = write_marker(validated_manifest)
+    # marker should run whether upload is skipped or run
+    marker.set_upstream(should_upload)
     marker.set_upstream(upload)
-    marker.set_upstream(should_upload)  # so marker still runs when upload is skipped
 
+    # graph
     start >> download >> validated_manifest >> should_upload
     should_upload >> upload
     marker >> end

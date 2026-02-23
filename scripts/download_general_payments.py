@@ -40,7 +40,6 @@ DEFAULT_METADATA_CACHE = REPO_ROOT / "metadata"
 # -----------------------------
 DATASET_CHOICES = ["general-payments"]
 
-YEAR_TO_DATASET_ID = {int(k): v for k, v in datasetid.getdatasetids(cache_dir=str(DEFAULT_METADATA_CACHE)).items()}
 
 PAGE_LIMIT = 5000
 CONNECT_TIMEOUT = 60
@@ -96,7 +95,12 @@ def write_json(path: Path, payload: Dict) -> None:
     tmp.replace(path)
 
 
-def setup_logging(out_root: Path, run_id: str, verbose: bool) -> Path:
+def setup_logging(out_root: Path, run_id: str, verbose: bool, airflow_mode: bool = False) -> Path:
+    """Configure logging.
+
+    - Always writes a run-scoped log file under out_root/metadata/logs
+    - In Airflow mode, avoids clearing existing handlers (Airflow manages task logging).
+    """
     logs_dir = out_root / "metadata" / "logs"
     ensure_dir(logs_dir)
 
@@ -106,8 +110,9 @@ def setup_logging(out_root: Path, run_id: str, verbose: bool) -> Path:
     level = logging.DEBUG if verbose else logging.INFO
     logger = logging.getLogger()
     logger.setLevel(level)
-    logger.handlers.clear()
-    logger.propagate = False
+    if not airflow_mode:
+        logger.handlers.clear()
+        logger.propagate = False
 
     fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(threadName)s | %(message)s")
 
@@ -116,10 +121,11 @@ def setup_logging(out_root: Path, run_id: str, verbose: bool) -> Path:
     fh.setFormatter(fmt)
     logger.addHandler(fh)
 
-    sh = logging.StreamHandler()
-    sh.setLevel(level)
-    sh.setFormatter(fmt)
-    logger.addHandler(sh)
+    if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
+        sh = logging.StreamHandler()
+        sh.setLevel(level)
+        sh.setFormatter(fmt)
+        logger.addHandler(sh)
 
     logging.info("Logging to: %s", log_path.resolve())
     return log_path
@@ -193,6 +199,7 @@ def ensure_totals_for_year(
     totals_limit: int,
     totals_country: str,
     verbose: bool,
+    show_progress: bool = True,
 ) -> Path:
     ensure_dir(totals_dir)
     latest = find_latest_totals_file(totals_dir)
@@ -215,6 +222,7 @@ def ensure_totals_for_year(
             min_year=year,
             max_year=year,
             verbose=verbose,
+            show_progress=show_progress,
         )
 
         df_new = load_company_totals_json(tmp_new)
@@ -254,6 +262,7 @@ def ensure_totals_for_year(
         min_year=year,
         max_year=year,
         verbose=verbose,
+        show_progress=show_progress,
     )
     return out_path
 
@@ -667,12 +676,23 @@ def _parse_slice(slice_str: Optional[str]) -> Optional[slice]:
     return slice(start, end)
 
 
-def resolve_dataset_id(dataset: str, year: int) -> str:
+def resolve_dataset_id(dataset: str, year: int, cache_dir: Path = DEFAULT_METADATA_CACHE) -> str:
+    """Resolve the datastore dataset_id for a given dataset/year.
+
+    Airflow note:
+      - This function must be called at task-runtime only (no network calls at module import).
+    """
     if dataset != "general-payments":
         raise ValueError(f"Unsupported dataset '{dataset}'. Supported: {DATASET_CHOICES}")
-    if year not in YEAR_TO_DATASET_ID:
-        raise ValueError(f"Unsupported year {year}. Supported: {sorted(YEAR_TO_DATASET_ID)}")
-    return YEAR_TO_DATASET_ID[year]
+
+    mapping = datasetid.getdatasetids(cache_dir=str(cache_dir))
+    key_str = str(int(year))
+    if key_str in mapping:
+        return mapping[key_str]
+    if int(year) in mapping:  # type: ignore[operator]
+        return mapping[int(year)]  # type: ignore[index]
+    supported = sorted(int(k) for k in mapping.keys())
+    raise ValueError(f"Unsupported year {year}. Supported: {supported}")
 
 
 def download_year(
@@ -692,6 +712,9 @@ def download_year(
     slice_str: Optional[str],
     resume: bool,
     verbose: bool,
+    run_id: Optional[str] = None,
+    airflow_mode: bool = False,
+    no_progress: bool = False,
 ) -> Path:
     page_workers = min(int(page_workers), MAX_PAGE_WORKERS_CAP)
 
@@ -708,6 +731,7 @@ def download_year(
             totals_limit=totals_limit,
             totals_country=totals_country,
             verbose=verbose,
+            show_progress=(not airflow_mode and not no_progress),
         )
     else:
         latest = find_latest_totals_file(totals_dir)
@@ -717,8 +741,8 @@ def download_year(
     if not totals_path or not totals_path.exists():
         raise FileNotFoundError(f"No totals JSON available in {totals_dir}")
 
-    run_id = build_run_id(dataset=dataset, year=year, dataset_id=dataset_id, totals_path=totals_path)
-    setup_logging(out_root=out_root, run_id=run_id, verbose=verbose)
+    run_id = run_id or build_run_id(dataset=dataset, year=year, dataset_id=dataset_id, totals_path=totals_path)
+    setup_logging(out_root=out_root, run_id=run_id, verbose=verbose, airflow_mode=airflow_mode)
 
     started_at = utc_now_iso()
     run_start_perf = time.perf_counter()
@@ -789,7 +813,7 @@ def download_year(
     with ThreadPoolExecutor(max_workers=id_workers) as ex:
         futs = {ex.submit(_job, cid, exp): (cid, exp) for cid, exp in tasks}
 
-        for fut in tqdm(as_completed(futs), total=len(futs), desc=f"Downloading ({dataset}:{year})", unit="job"):
+        for fut in tqdm(as_completed(futs), total=len(futs), desc=f"Downloading ({dataset}:{year})", unit="job", disable=(airflow_mode or no_progress)):
             cid, expected_total = futs[fut]
             try:
                 company_id, y, ok, msg, audit = fut.result()
@@ -868,6 +892,9 @@ def download_year(
 @click.option("--slice", "slice_str", type=str, default=None)
 @click.option("--resume/--no-resume", default=True, show_default=True, help="Skip already-downloaded valid files.")
 @click.option("--verbose", is_flag=True)
+@click.option("--run-id", type=str, default=None, help="Optional override for run_id (e.g., Airflow run_id).")
+@click.option("--airflow-mode", is_flag=True, help="Adjust logging/behavior for execution under Airflow.")
+@click.option("--no-progress", is_flag=True, help="Disable tqdm/progress output (recommended for Airflow logs).")
 def cli(**kwargs) -> None:
     manifest_path = download_year(**kwargs)
     click.echo(str(manifest_path.resolve()))

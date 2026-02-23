@@ -4,6 +4,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile
     container_name: openpayments-dev
+    image: openpayments:latest
     volumes:
       - ./data:/app/data
     working_dir: /app
