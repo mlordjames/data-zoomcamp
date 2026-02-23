@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import json
 from datetime import datetime
 from pathlib import Path
@@ -11,32 +12,39 @@ from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.providers.standard.operators.python import ShortCircuitOperator
 from docker.types import Mount
 
-# Airflow container mounts your repo at /opt/project (compose: - ..:/opt/project)
-PROJECT_ROOT = Path("/opt/project")
-HOST_DATA_DIR = PROJECT_ROOT / "data"  # exists inside Airflow containers
 
-# Container paths (inside your openpayments pipeline image)
+# -------------------------------------------------------------------
+# PATHS (IMPORTANT!)
+# -------------------------------------------------------------------
+# 1) HOST paths (EC2 filesystem): used ONLY for Docker bind mounts.
+# DockerOperator talks to the host Docker daemon via /var/run/docker.sock,
+# so Mount(source=...) MUST exist on the EC2 host.
+HOST_REPO_DIR = os.environ.get("HOST_REPO_DIR", "/opt/data-engineering-zoomcamp")
+HOST_DATA_DIR = os.path.join(HOST_REPO_DIR, "data")
+
+# 2) AIRFLOW-CONTAINER paths: used by validate_manifest() task which runs
+# inside Airflow's Python environment/container.
+# In your airflow docker-compose you mounted the repo as:  ..:/opt/project
+AIRFLOW_REPO_DIR = Path("/opt/project")
+AIRFLOW_DATA_DIR = AIRFLOW_REPO_DIR / "data"
+
+# -------------------------------------------------------------------
+# PIPELINE CONTAINER PATHS (inside openpayments image)
+# -------------------------------------------------------------------
 CONTAINER_WORKDIR = "/app"
 CONTAINER_DATA_DIR = "/app/data"
 CONTAINER_OUT_ROOT = "/app/data/out"
 CONTAINER_TOTALS_DIR = "/app/data/totals"
 
-DEFAULT_IMAGE = "openpayments:latest"  # stable tag (recommended)
+DEFAULT_IMAGE = "openpayments:latest"
 DEFAULT_BUCKET = "openpayments-dezoomcamp2026-us-west-1-1f83ec"
 
+# Bind mount host ./data -> container /app/data
 DATA_MOUNT = Mount(
-    source=str(HOST_DATA_DIR),
+    source=HOST_DATA_DIR,
     target=CONTAINER_DATA_DIR,
     type="bind",
 )
-
-
-def _bool_flag(name: str, val: bool) -> str:
-    """
-    Helper: returns CLI flag name if True else empty string.
-    Used for optional click flags like --verbose.
-    """
-    return name if val else ""
 
 
 with DAG(
@@ -46,7 +54,7 @@ with DAG(
     catchup=False,
     tags=["openpayments", "phase3", "docker"],
     params={
-        # runtime image
+        # image
         "image": Param(DEFAULT_IMAGE, type="string"),
 
         # download params
@@ -75,9 +83,9 @@ with DAG(
     start = EmptyOperator(task_id="start")
     end = EmptyOperator(task_id="end")
 
-    # -------------------------
-    # 1) DOWNLOAD (container)
-    # -------------------------
+    # ---------------------------------------------------------------
+    # Task 1: DOWNLOAD (runs inside pipeline container)
+    # ---------------------------------------------------------------
     download = DockerOperator(
         task_id="download_in_container",
         image="{{ params.image }}",
@@ -101,27 +109,39 @@ with DAG(
             "--totals-country", "{{ params.totals_country }}",
             "{{ '--resume' if params.resume else '--no-resume' }}",
             "{{ '--verbose' if params.verbose else '' }}",
-            # lineage
             "--run-id", "{{ run_id }}",
-            # airflow-friendly logs
             "--airflow-mode",
             "--no-progress",
         ],
         mounts=[DATA_MOUNT],
-        auto_remove="success",  # Airflow 3: 'never' | 'success' | 'force'
+        auto_remove="success",  # Airflow 3 requires: 'never' | 'success' | 'force'
     )
 
-    # -------------------------
-    # 2) VALIDATE (in Airflow)
-    # -------------------------
+    # ---------------------------------------------------------------
+    # Task 2: VALIDATE MANIFEST (runs inside Airflow container)
+    # ---------------------------------------------------------------
     @task
     def validate_manifest() -> str:
+        """
+        What is the manifest?
+
+        Your downloader writes a "manifest.json" that summarizes the run:
+        - run id
+        - what files were downloaded
+        - status (completed / completed_with_failures)
+        - paths to key artifacts like report CSV and audits JSONL
+
+        This task just confirms:
+        - manifest exists
+        - status is acceptable
+        - referenced output files exist
+        """
         ctx = get_current_context()
         run_id = ctx["run_id"]
 
+        # IMPORTANT: this path is inside the Airflow container (repo mounted at /opt/project)
         manifest_path = (
-            PROJECT_ROOT
-            / "data"
+            AIRFLOW_DATA_DIR
             / "out"
             / "metadata"
             / "runs"
@@ -130,15 +150,22 @@ with DAG(
         )
 
         if not manifest_path.exists():
-            raise FileNotFoundError(f"Manifest not found: {manifest_path}")
+            raise FileNotFoundError(
+                f"Manifest not found: {manifest_path}\n"
+                f"Check that Airflow compose mounts your repo to /opt/project "
+                f"and that the downloader wrote to data/out/metadata/runs/run_id=..."
+            )
 
         manifest = json.loads(manifest_path.read_text())
+
         status = manifest.get("status")
         if status not in {"completed", "completed_with_failures"}:
             raise ValueError(f"Unexpected manifest status: {status}")
 
+        # The manifest stores these as strings; validate they exist (inside Airflow container view)
         report_csv = Path(manifest["report_csv"])
         audits_jsonl = Path(manifest["audits_jsonl"])
+
         if not report_csv.exists():
             raise FileNotFoundError(f"report_csv missing: {report_csv}")
         if not audits_jsonl.exists():
@@ -152,18 +179,18 @@ with DAG(
     validated_manifest = validate_manifest()
     validated_manifest.set_upstream(download)
 
-    # -------------------------
-    # 3) SHOULD UPLOAD?
-    # -------------------------
+    # ---------------------------------------------------------------
+    # Task 3: Gate upload step
+    # ---------------------------------------------------------------
     should_upload = ShortCircuitOperator(
         task_id="should_upload",
         python_callable=lambda **kwargs: bool(kwargs["params"]["upload_to_s3"]),
     )
     should_upload.set_upstream(validated_manifest)
 
-    # -------------------------
-    # 4) UPLOAD (container)
-    # -------------------------
+    # ---------------------------------------------------------------
+    # Task 4: UPLOAD (runs inside pipeline container)
+    # ---------------------------------------------------------------
     upload = DockerOperator(
         task_id="upload_in_container",
         image="{{ params.image }}",
@@ -186,13 +213,13 @@ with DAG(
             "{{ '--verbose' if params.verbose else '' }}",
         ],
         mounts=[DATA_MOUNT],
-        auto_remove="success",  # Airflow 3 compliant
+        auto_remove="success",
     )
     upload.set_upstream(should_upload)
 
-    # -------------------------
-    # 5) MARKER (in Airflow)
-    # -------------------------
+    # ---------------------------------------------------------------
+    # Task 5: Marker (runs inside Airflow container)
+    # ---------------------------------------------------------------
     @task
     def write_marker(manifest_path: str) -> str:
         ctx = get_current_context()
@@ -216,11 +243,9 @@ with DAG(
         return str(out)
 
     marker = write_marker(validated_manifest)
-    # marker should run whether upload is skipped or run
     marker.set_upstream(should_upload)
     marker.set_upstream(upload)
 
-    # graph
     start >> download >> validated_manifest >> should_upload
     should_upload >> upload
     marker >> end
